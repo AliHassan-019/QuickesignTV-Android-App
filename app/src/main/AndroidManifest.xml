@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Needed for ECP HTTP calls and SSDP -->
+    <!-- Network + multicast for discovery and ECP HTTP -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Optional: for notifications on Android 13+ (you should request runtime permission in activity if you want) -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Notifications (Android 13+) so Worker messages are visible -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -13,7 +16,8 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.RokuTv">
+        android:theme="@style/Theme.RokuTv"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".ui.MainActivity"

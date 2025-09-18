@@ -36,8 +36,8 @@ object SchedulerHelper {
         val request = OneTimeWorkRequestBuilder<RokuWorker>()
             .setInitialDelay(delay, TimeUnit.MILLISECONDS)
             .setInputData(data)
-            .addTag(tagType)     // allows cancel-all-by-tag
-            .addTag(unique)      // addressable if needed
+            .addTag(tagType)     // cancel all by tag
+            .addTag(unique)      // per-IP unique
             .build()
 
         WorkManager.getInstance(context).enqueueUniqueWork(
@@ -47,16 +47,15 @@ object SchedulerHelper {
         )
     }
 
-    fun cancelDailyAll(context: Context, type: String) {
-        val tagType = if (type == "ON") "dailyOn" else "dailyOff"
-        WorkManager.getInstance(context).cancelAllWorkByTag(tagType)
-    }
-
-    // Helper to schedule daily for ALL IPs at once
     fun scheduleDailyForAll(context: Context, type: String, hour: Int, minute: Int, ips: List<String>) {
         ips.forEach { ip ->
             if (ip.isNotBlank()) scheduleDaily(context, type, hour, minute, ip)
         }
+    }
+
+    fun cancelDailyAll(context: Context, type: String) {
+        val tagType = if (type == "ON") "dailyOn" else "dailyOff"
+        WorkManager.getInstance(context).cancelAllWorkByTag(tagType)
     }
 
     // ---------- RELAUNCH (single IP) ----------

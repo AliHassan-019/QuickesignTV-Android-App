@@ -2,8 +2,13 @@
 
 package com.example.rokutv.ui
 
+import android.Manifest
 import android.app.TimePickerDialog
+import android.content.pm.PackageManager
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -27,6 +32,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.example.rokutv.data.RokuPreferences
 import com.example.rokutv.network.RokuApiService
 import com.example.rokutv.utils.Constants
@@ -41,22 +48,27 @@ import java.util.Calendar
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val prefs = RokuPreferences(this)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                1001
+            )
+        }
 
+        val prefs = RokuPreferences(this)
         setContent {
             MaterialTheme {
                 Scaffold(
-                    topBar = {
-                        CenterAlignedTopAppBar(
-                            title = { Text("Quickesign TV Control") }
-                        )
-                    }
+                    topBar = { CenterAlignedTopAppBar(title = { Text("Quickesign TV Control") }) }
                 ) { inner ->
-                    Box(Modifier.padding(inner)) {
-                        RokuAppUI(prefs)
-                    }
+                    Box(Modifier.padding(inner)) { RokuAppUI(prefs) }
                 }
             }
         }
@@ -69,7 +81,6 @@ fun RokuAppUI(prefs: RokuPreferences) {
     val scope = rememberCoroutineScope()
     val scroll = rememberScrollState()
 
-    // Green switches
     val EnabledThumb = Color(0xFF22C55E)
     val EnabledTrack = Color(0xFFBBF7D0)
     val switchColors = SwitchDefaults.colors(
@@ -83,17 +94,14 @@ fun RokuAppUI(prefs: RokuPreferences) {
 
     var expanded by remember { mutableStateOf(false) }
     var selectedApp by remember { mutableStateOf(prefs.getSelectedApp() ?: Constants.APP_QUICKESIGN) }
-
     var interval by remember { mutableStateOf(prefs.getIntervalSeconds()) }
 
-    // Global toggles/times (applied to all)
     var autoLaunchEnabled by remember { mutableStateOf(prefs.getAutoRelaunchEnabled()) }
     var scheduleOnEnabled by remember { mutableStateOf(prefs.isScheduleOnEnabled()) }
     var scheduleOffEnabled by remember { mutableStateOf(prefs.isScheduleOffEnabled()) }
     var onTime by remember { mutableStateOf(prefs.getOnTimeLabel() ?: "Not set") }
     var offTime by remember { mutableStateOf(prefs.getOffTimeLabel() ?: "Not set") }
 
-    // Ensure some IP is “selected” for highlight
     LaunchedEffect(savedIps) {
         if (selectedIp.isEmpty() && savedIps.isNotEmpty()) {
             selectedIp = savedIps.first()
@@ -108,7 +116,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // ---------- IP MANAGEMENT ----------
+        // IP MANAGEMENT
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("IP Management", style = MaterialTheme.typography.titleMedium)
@@ -140,26 +148,20 @@ fun RokuAppUI(prefs: RokuPreferences) {
                 }
 
                 LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(160.dp)
+                    modifier = Modifier.fillMaxWidth().height(160.dp)
                 ) {
                     items(savedIps) { ip ->
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = if (ip == selectedIp) "✅ $ip" else ip,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable {
-                                        selectedIp = ip
-                                        prefs.saveSelectedIp(ip)
-                                    }
+                                modifier = Modifier.weight(1f).clickable {
+                                    selectedIp = ip
+                                    prefs.saveSelectedIp(ip)
+                                }
                             )
                             IconButton(onClick = {
                                 val newList = savedIps.filter { it != ip }.toMutableList()
@@ -171,11 +173,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
                                 }
                                 Toast.makeText(context, "IP removed", Toast.LENGTH_SHORT).show()
                             }) {
-                                Icon(
-                                    Icons.Outlined.Delete,
-                                    contentDescription = "Remove",
-                                    tint = Color(0xFFEF4444)
-                                )
+                                Icon(Icons.Outlined.Delete, contentDescription = "Remove", tint = Color(0xFFEF4444))
                             }
                         }
                         Divider()
@@ -184,7 +182,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
             }
         }
 
-        // ---------- DISCOVERY ----------
+        // DISCOVERY
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Discovery", style = MaterialTheme.typography.titleMedium)
@@ -192,20 +190,29 @@ fun RokuAppUI(prefs: RokuPreferences) {
                     onClick = {
                         scope.launch {
                             Toast.makeText(context, "Scanning…", Toast.LENGTH_SHORT).show()
-                            val found = withContext(Dispatchers.IO) {
-                                RokuApiService.discoverDevices(2000)
+                            val wifi = context.applicationContext.getSystemService(WifiManager::class.java)
+                            val lock = wifi?.createMulticastLock("roku-ssdp")?.apply {
+                                setReferenceCounted(true); acquire()
                             }
-                            if (found.isEmpty()) {
-                                Toast.makeText(context, "No devices found", Toast.LENGTH_SHORT).show()
-                            } else {
-                                val merged = (savedIps + found).toSet().toMutableList()
-                                savedIps = merged
-                                prefs.saveIpList(merged.toSet())
-                                if (selectedIp.isEmpty()) {
-                                    selectedIp = merged.first()
-                                    prefs.saveSelectedIp(selectedIp)
+                            try {
+                                val found = withContext(Dispatchers.IO) {
+                                    RokuApiService.discoverDevices(context.applicationContext, 3000)
                                 }
-                                Toast.makeText(context, "Discovered: ${found.joinToString()}", Toast.LENGTH_LONG).show()
+                                Log.d("RokuScan", "Found: $found")
+                                if (found.isEmpty()) {
+                                    Toast.makeText(context, "No devices found", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val merged = (savedIps + found).toSet().toMutableList()
+                                    savedIps = merged
+                                    prefs.saveIpList(merged.toSet())
+                                    if (selectedIp.isEmpty()) {
+                                        selectedIp = merged.first()
+                                        prefs.saveSelectedIp(selectedIp)
+                                    }
+                                    Toast.makeText(context, "Discovered: ${found.joinToString()}", Toast.LENGTH_LONG).show()
+                                }
+                            } finally {
+                                try { lock?.release() } catch (_: Exception) {}
                             }
                         }
                     },
@@ -218,7 +225,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
             }
         }
 
-        // ---------- APP SELECTION ----------
+        // APPLICATION
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Application", style = MaterialTheme.typography.titleMedium)
@@ -246,7 +253,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
             }
         }
 
-        // ---------- AUTO RELAUNCH ----------
+        // AUTO RELAUNCH
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Auto Relaunch", style = MaterialTheme.typography.titleMedium)
@@ -297,20 +304,18 @@ fun RokuAppUI(prefs: RokuPreferences) {
             }
         }
 
-        // ---------- DAILY SCHEDULING ----------
+        // DAILY SCHEDULING
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Daily Scheduling", style = MaterialTheme.typography.titleMedium)
 
-                // ON row
+                // ON
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Power on time: $onTime")
-                    }
+                    Column(Modifier.weight(1f)) { Text("Power on time: $onTime") }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
                             enabled = scheduleOnEnabled,
@@ -319,9 +324,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
                                     val label = formatTime(hour, minute)
                                     onTime = label
                                     prefs.saveOnTimeLabel(label)
-                                    SchedulerHelper.scheduleDailyForAll(
-                                        context.applicationContext, "ON", hour, minute, savedIps
-                                    )
+                                    SchedulerHelper.scheduleDailyForAll(context.applicationContext, "ON", hour, minute, savedIps)
                                 }
                             }
                         ) { Icon(Icons.Outlined.Schedule, contentDescription = "Change time") }
@@ -339,9 +342,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
                                         val label = formatTime(hour, minute)
                                         onTime = label
                                         prefs.saveOnTimeLabel(label)
-                                        SchedulerHelper.scheduleDailyForAll(
-                                            context.applicationContext, "ON", hour, minute, savedIps
-                                        )
+                                        SchedulerHelper.scheduleDailyForAll(context.applicationContext, "ON", hour, minute, savedIps)
                                         Toast.makeText(context, "Power on scheduled at $label", Toast.LENGTH_SHORT).show()
                                     }
                                 } else {
@@ -358,15 +359,13 @@ fun RokuAppUI(prefs: RokuPreferences) {
 
                 Divider()
 
-                // OFF row
+                // OFF
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Power off time: $offTime")
-                    }
+                    Column(Modifier.weight(1f)) { Text("Power off time: $offTime") }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
                             enabled = scheduleOffEnabled,
@@ -375,9 +374,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
                                     val label = formatTime(hour, minute)
                                     offTime = label
                                     prefs.saveOffTimeLabel(label)
-                                    SchedulerHelper.scheduleDailyForAll(
-                                        context.applicationContext, "OFF", hour, minute, savedIps
-                                    )
+                                    SchedulerHelper.scheduleDailyForAll(context.applicationContext, "OFF", hour, minute, savedIps)
                                 }
                             }
                         ) { Icon(Icons.Outlined.Schedule, contentDescription = "Change time") }
@@ -395,9 +392,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
                                         val label = formatTime(hour, minute)
                                         offTime = label
                                         prefs.saveOffTimeLabel(label)
-                                        SchedulerHelper.scheduleDailyForAll(
-                                            context.applicationContext, "OFF", hour, minute, savedIps
-                                        )
+                                        SchedulerHelper.scheduleDailyForAll(context.applicationContext, "OFF", hour, minute, savedIps)
                                         Toast.makeText(context, "Power off scheduled at $label", Toast.LENGTH_SHORT).show()
                                     }
                                 } else {
@@ -414,13 +409,13 @@ fun RokuAppUI(prefs: RokuPreferences) {
             }
         }
 
-        // ---------- MANUAL CONTROLS ----------
+        // MANUAL CONTROLS (with professional logs)
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Manual Controls", style = MaterialTheme.typography.titleMedium)
 
                 Button(
-                    onClick = { scope.sendToAll(savedIps, "keypress/PowerOn", context) },
+                    onClick = { scope.sendToAll(savedIps, "keypress/PowerOn", "Power On", context) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Outlined.Power, contentDescription = null)
@@ -428,7 +423,7 @@ fun RokuAppUI(prefs: RokuPreferences) {
                     Text("Power On")
                 }
                 Button(
-                    onClick = { scope.sendToAll(savedIps, "keypress/PowerOff", context) },
+                    onClick = { scope.sendToAll(savedIps, "keypress/PowerOff", "Power Off", context) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Outlined.PowerSettingsNew, contentDescription = null)
@@ -436,7 +431,10 @@ fun RokuAppUI(prefs: RokuPreferences) {
                     Text("Power Off")
                 }
                 FilledTonalButton(
-                    onClick = { scope.sendToAll(savedIps, "launch/$selectedApp", context) },
+                    onClick = {
+                        val label = "Launch " + (Constants.APP_NAMES[selectedApp] ?: selectedApp)
+                        scope.sendToAll(savedIps, "launch/$selectedApp", label, context)
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Outlined.Refresh, contentDescription = null)
@@ -450,7 +448,12 @@ fun RokuAppUI(prefs: RokuPreferences) {
 
 // ---- helpers ----
 
-private fun CoroutineScope.sendToAll(ips: List<String>, command: String, context: android.content.Context) {
+private fun CoroutineScope.sendToAll(
+    ips: List<String>,
+    command: String,
+    label: String,
+    context: android.content.Context
+) {
     if (ips.isEmpty()) {
         Toast.makeText(context, "No devices available", Toast.LENGTH_SHORT).show()
         return
@@ -460,14 +463,17 @@ private fun CoroutineScope.sendToAll(ips: List<String>, command: String, context
             async {
                 val clean = ip.trim()
                 if (clean.isNotBlank() && clean.contains(".")) {
-                    RokuApiService.sendCommand(clean, command)
+                    Log.d("RokuSend", "$label → $clean")
+                    val ok = RokuApiService.sendCommand(clean, command)
+                    if (!ok) Log.w("RokuSend", "$label failed for $clean")
+                    ok
                 } else false
             }
         }
         val results = jobs.awaitAll()
         val ok = results.count { it }
         withContext(Dispatchers.Main) {
-            Toast.makeText(context, "$command → $ok/${ips.size} succeeded", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "$label → $ok/${ips.size} succeeded", Toast.LENGTH_SHORT).show()
         }
     }
 }

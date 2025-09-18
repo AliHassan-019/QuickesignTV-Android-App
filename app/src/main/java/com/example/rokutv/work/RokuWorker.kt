@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.work.Worker
@@ -17,12 +18,18 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
         val ip = inputData.getString("ip") ?: return Result.failure()
         val command = inputData.getString("command") ?: return Result.failure()
 
+        val label = labelForCommand(command)
+        Log.d("RokuWorker", "$label → $ip")
+
         val ok = RokuApiService.sendCommand(ip, command)
-        notify("Roku command", "${if (ok) "Sent" else "Failed"}: $command → $ip")
+        notify(label, if (ok) "Success → $ip" else "Failed → $ip")
 
-        if (!ok) return Result.retry()
+        if (!ok) {
+            Log.w("RokuWorker", "$label failed → $ip, will retry")
+            return Result.retry()
+        }
 
-        // Daily rescheduler (per-IP)
+        // Re-schedule daily (per IP)
         val repeatDaily = inputData.getBoolean("repeatDaily", false)
         if (repeatDaily) {
             val type = inputData.getString("type") ?: return Result.success()
@@ -31,7 +38,7 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
             SchedulerHelper.scheduleDaily(applicationContext, type, hour, minute, ip)
         }
 
-        // Relaunch chain rescheduler (per-IP)
+        // Re-chain relaunch (per IP)
         if (inputData.getBoolean("relaunch", false)) {
             val interval = inputData.getInt("relaunchIntervalSec", 30)
             val appId = inputData.getString("appId") ?: return Result.success()
@@ -39,6 +46,13 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
         }
 
         return Result.success()
+    }
+
+    private fun labelForCommand(command: String): String = when {
+        command.startsWith("keypress/PowerOn", true) -> "Power On"
+        command.startsWith("keypress/PowerOff", true) -> "Power Off"
+        command.startsWith("launch/", true) -> "Launch"
+        else -> command
     }
 
     private fun notify(title: String, text: String) {
@@ -57,6 +71,7 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
             .setContentText(text)
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(applicationContext).notify((System.currentTimeMillis() % 100000).toInt(), notif)
+        NotificationManagerCompat.from(applicationContext)
+            .notify((System.currentTimeMillis() % 100000).toInt(), notif)
     }
 }

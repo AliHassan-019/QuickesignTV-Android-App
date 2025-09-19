@@ -3,56 +3,103 @@ package com.example.rokutv.work
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import com.example.rokutv.data.RokuPreferences
 import com.example.rokutv.network.RokuApiService
 
 class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
     Worker(appContext, workerParams) {
 
+    companion object {
+        const val ACTION_FEEDBACK = "com.example.rokutv.FEEDBACK"
+        const val EXTRA_MESSAGE = "message"
+    }
+
     override fun doWork(): Result {
         val ip = inputData.getString("ip") ?: return Result.failure()
         val command = inputData.getString("command") ?: return Result.failure()
+        val isRelaunch = inputData.getBoolean("relaunch", false)
 
-        val label = labelForCommand(command)
-        Log.d("RokuWorker", "$label → $ip")
+        val prefs = RokuPreferences(applicationContext)
+        val label = labelFor(command)
 
-        val ok = RokuApiService.sendCommand(ip, command)
-        notify(label, if (ok) "Success → $ip" else "Failed → $ip")
-
-        if (!ok) {
-            Log.w("RokuWorker", "$label failed → $ip, will retry")
-            return Result.retry()
+        // Do not wake TVs after Power Off: if suppressed and TV is OFF, skip relaunch
+        if (isRelaunch && command.startsWith("launch/", true)) {
+            if (prefs.isSuppressed(ip)) {
+                val on = RokuApiService.isPoweredOn(ip) // unknown -> treat OFF
+                if (!on) {
+                    val msg = "Skipped relaunch on $ip (TV is OFF)"
+                    Log.i("RokuWorker", msg)
+                    toastToApp(msg)
+                    notify("Auto Relaunch", msg)
+                    rescheduleRelaunch()
+                    return Result.success()
+                } else {
+                    // TV back on -> resume
+                    prefs.clearSuppression(ip)
+                }
+            }
         }
 
-        // Re-schedule daily (per IP)
-        val repeatDaily = inputData.getBoolean("repeatDaily", false)
-        if (repeatDaily) {
+        val ok = RokuApiService.sendCommand(ip, command)
+
+        if (isRelaunch && command.startsWith("launch/", true)) {
+            val msg = if (ok) "Auto relaunch on $ip" else "Auto relaunch failed on $ip"
+            (if (ok) Log.i("RokuWorker", msg) else Log.w("RokuWorker", msg))
+            toastToApp(msg)
+            notify("Auto Relaunch", msg)
+        } else {
+            val msg = if (ok) "$label → $ip" else "$label failed → $ip"
+            (if (ok) Log.i("RokuWorker", msg) else Log.w("RokuWorker", msg))
+            // optional: we only send in-app snackbars for relaunch; manual actions already show toasts in UI
+        }
+
+        if (!ok) return Result.retry()
+
+        // Maintain suppression on power commands
+        if (command.startsWith("keypress/PowerOff", true)) prefs.suppressIp(ip)
+        if (command.startsWith("keypress/PowerOn", true)) prefs.clearSuppression(ip)
+
+        // Daily self-reschedule
+        if (inputData.getBoolean("repeatDaily", false)) {
             val type = inputData.getString("type") ?: return Result.success()
             val hour = inputData.getInt("hour", 0)
             val minute = inputData.getInt("minute", 0)
             SchedulerHelper.scheduleDaily(applicationContext, type, hour, minute, ip)
         }
 
-        // Re-chain relaunch (per IP)
-        if (inputData.getBoolean("relaunch", false)) {
-            val interval = inputData.getInt("relaunchIntervalSec", 30)
-            val appId = inputData.getString("appId") ?: return Result.success()
-            SchedulerHelper.scheduleRelaunch(applicationContext, interval, ip, appId)
-        }
+        // Re-chain relaunch
+        if (isRelaunch) rescheduleRelaunch()
 
         return Result.success()
     }
 
-    private fun labelForCommand(command: String): String = when {
+    private fun rescheduleRelaunch() {
+        val ip = inputData.getString("ip") ?: return
+        val appId = inputData.getString("appId") ?: return
+        val interval = inputData.getInt("relaunchIntervalSec", 30)
+        SchedulerHelper.scheduleRelaunch(applicationContext, interval, ip, appId)
+    }
+
+    private fun labelFor(command: String): String = when {
         command.startsWith("keypress/PowerOn", true) -> "Power On"
         command.startsWith("keypress/PowerOff", true) -> "Power Off"
         command.startsWith("launch/", true) -> "Launch"
         else -> command
+    }
+
+    // Send feedback into the running app to display as a snackbar
+    private fun toastToApp(message: String) {
+        val intent = Intent(ACTION_FEEDBACK)
+            .setPackage(applicationContext.packageName)
+            .putExtra(EXTRA_MESSAGE, message)
+        applicationContext.sendBroadcast(intent)
     }
 
     private fun notify(title: String, text: String) {
@@ -61,12 +108,13 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (nm.getNotificationChannel(channelId) == null) {
                 nm.createNotificationChannel(
-                    NotificationChannel(channelId, "Roku Operations", NotificationManager.IMPORTANCE_LOW)
+                    NotificationChannel(channelId, "Roku Operations", NotificationManager.IMPORTANCE_DEFAULT)
                 )
             }
         }
         val notif = NotificationCompat.Builder(applicationContext, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentTitle(title)
             .setContentText(text)
             .setAutoCancel(true)

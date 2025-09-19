@@ -21,6 +21,8 @@ import kotlin.math.min
 
 object RokuApiService {
 
+    enum class PowerMode { POWER_ON, POWER_OFF, DISPLAY_OFF, UNKNOWN }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(3, TimeUnit.SECONDS)
@@ -47,11 +49,49 @@ object RokuApiService {
             }
         } catch (e: Exception) {
             Log.e("RokuHTTP", "Network error to $ip", e)
-            return false
+            false
         }
     }
 
-    /** SSDP then HTTP sweep fallback */
+    /** Read power-mode from /query/device-info. Returns null if unknown/unreachable. */
+    fun getPowerMode(ip: String): PowerMode? {
+        return try {
+            val req = Request.Builder()
+                .url("http://$ip:8060/query/device-info")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return null // unreachable or sleeping with standby off
+                }
+                val body = resp.body?.string().orEmpty()
+                // Power mode may not always be present; handle defensively.
+                val regex = Regex("<power-mode>(.*?)</power-mode>", RegexOption.IGNORE_CASE)
+                val m = regex.find(body)
+                val mode = when (m?.groupValues?.getOrNull(1)?.trim()?.lowercase()) {
+                    "poweron" -> PowerMode.POWER_ON
+                    "poweroff" -> PowerMode.POWER_OFF
+                    "displayoff" -> PowerMode.DISPLAY_OFF
+                    else -> PowerMode.UNKNOWN
+                }
+                mode
+            }
+        } catch (e: Exception) {
+            Log.e("RokuHTTP", "device-info error $ip", e)
+            null
+        }
+    }
+
+    /** True if TV is on. Unknown treated as OFF when used with suppression logic. */
+    fun isPoweredOn(ip: String): Boolean {
+        return when (val mode = getPowerMode(ip)) {
+            PowerMode.POWER_ON -> true
+            PowerMode.POWER_OFF, PowerMode.DISPLAY_OFF -> false
+            PowerMode.UNKNOWN, null -> false
+        }
+    }
+
+    /** SSDP then HTTP sweep fallback for discovery */
     fun discoverDevices(context: Context, timeoutMs: Int = 3000): Set<String> {
         val ssdp = try { ssdpDiscover(timeoutMs) } catch (e: Exception) {
             Log.e("RokuSSDP", "SSDP error", e); emptySet()

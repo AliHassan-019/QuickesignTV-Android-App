@@ -1,18 +1,16 @@
 package com.example.rokutv.work
 
 import android.content.Context
+import android.util.Log
 import androidx.work.*
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
 object SchedulerHelper {
 
-    // ---------- Auto Relaunch (per IP, any interval >= 1 sec) ----------
+    // ---------- Auto Relaunch ----------
     fun scheduleRelaunchForAll(context: Context, intervalSec: Int, ips: List<String>, appId: String) {
-        val wm = WorkManager.getInstance(context)
-        ips.forEach { ip ->
-            scheduleRelaunch(context, intervalSec, ip, appId)
-        }
+        ips.forEach { ip -> scheduleRelaunch(context, intervalSec, ip, appId) }
     }
 
     fun scheduleRelaunch(context: Context, intervalSec: Int, ip: String, appId: String) {
@@ -24,24 +22,29 @@ object SchedulerHelper {
             "relaunchIntervalSec" to delay.toInt(),
             "appId" to appId
         )
+
         val req = OneTimeWorkRequestBuilder<RokuWorker>()
             .setInitialDelay(delay, TimeUnit.SECONDS)
             .setInputData(data)
             .addTag("relaunch")
             .addTag("relaunch_$ip")
             .build()
+
         WorkManager.getInstance(context).enqueueUniqueWork(
             "relaunch_$ip",
             ExistingWorkPolicy.REPLACE,
             req
         )
+
+        Log.d("SchedulerHelper", "Scheduled relaunch for $ip every $delay sec")
     }
 
     fun cancelRelaunchAll(context: Context) {
         WorkManager.getInstance(context).cancelAllWorkByTag("relaunch")
+        Log.d("SchedulerHelper", "Canceled all relaunch jobs")
     }
 
-    // ---------- Daily Scheduling (per IP, repeats itself daily) ----------
+    // ---------- Daily Scheduling ----------
     fun scheduleDailyForAll(context: Context, type: String, hour: Int, minute: Int, ips: List<String>) {
         ips.forEach { ip -> scheduleDaily(context, type, hour, minute, ip) }
     }
@@ -79,10 +82,13 @@ object SchedulerHelper {
             ExistingWorkPolicy.REPLACE,
             request
         )
+
+        Log.d("SchedulerHelper", "Scheduled daily $type for $ip at $hour:$minute (delay=$delay ms)")
     }
 
     fun cancelDailyAll(context: Context, type: String) {
         val tag = if (type.equals("ON", true)) "daily_on" else "daily_off"
         WorkManager.getInstance(context).cancelAllWorkByTag(tag)
+        Log.d("SchedulerHelper", "Canceled all $type jobs")
     }
 }

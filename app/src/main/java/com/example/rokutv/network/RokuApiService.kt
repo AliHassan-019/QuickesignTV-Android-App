@@ -3,10 +3,8 @@ package com.example.rokutv.network
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.runBlocking
+import com.example.rokutv.data.Device
+import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -29,88 +27,88 @@ object RokuApiService {
         .writeTimeout(3, TimeUnit.SECONDS)
         .build()
 
+    // Short timeout client for sweeps
     private val sweepClient = client.newBuilder()
-        .connectTimeout(900, TimeUnit.MILLISECONDS)
-        .readTimeout(900, TimeUnit.MILLISECONDS)
-        .writeTimeout(900, TimeUnit.MILLISECONDS)
+        .connectTimeout(800, TimeUnit.MILLISECONDS)
+        .readTimeout(800, TimeUnit.MILLISECONDS)
+        .writeTimeout(800, TimeUnit.MILLISECONDS)
         .build()
 
-    /** POST an ECP command; true if HTTP 2xx */
+    /** Send a Roku ECP command */
     fun sendCommand(ip: String, command: String): Boolean {
         return try {
             val url = "http://$ip:8060/$command"
-            Log.d("RokuHTTP", "POST ECP to $ip")
             val empty = RequestBody.create("text/plain".toMediaTypeOrNull(), ByteArray(0))
-            val request = Request.Builder().url(url).post(empty).build()
-            client.newCall(request).execute().use { resp ->
-                val ok = resp.isSuccessful
-                if (!ok) Log.w("RokuHTTP", "HTTP ${resp.code} from $ip")
-                ok
-            }
+            val req = Request.Builder().url(url).post(empty).build()
+            client.newCall(req).execute().use { it.isSuccessful }
         } catch (e: Exception) {
-            Log.e("RokuHTTP", "Network error to $ip", e)
+            Log.e("RokuHTTP", "sendCommand error $ip", e)
             false
         }
     }
 
-    /** Read power-mode from /query/device-info. Returns null if unknown/unreachable. */
-    fun getPowerMode(ip: String): PowerMode? {
+    /** Query /device-info and extract name + power mode */
+    fun getDeviceInfo(ip: String): Pair<String, PowerMode?> {
         return try {
-            val req = Request.Builder()
-                .url("http://$ip:8060/query/device-info")
-                .get()
-                .build()
+            val req = Request.Builder().url("http://$ip:8060/query/device-info").get().build()
             client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    return null // unreachable or sleeping with standby off
-                }
+                if (!resp.isSuccessful) return "" to null
                 val body = resp.body?.string().orEmpty()
-                // Power mode may not always be present; handle defensively.
-                val regex = Regex("<power-mode>(.*?)</power-mode>", RegexOption.IGNORE_CASE)
-                val m = regex.find(body)
-                val mode = when (m?.groupValues?.getOrNull(1)?.trim()?.lowercase()) {
+                val nameRegex = Regex("<friendly-device-name>(.*?)</friendly-device-name>", RegexOption.IGNORE_CASE)
+                val powerRegex = Regex("<power-mode>(.*?)</power-mode>", RegexOption.IGNORE_CASE)
+
+                val name = nameRegex.find(body)?.groupValues?.getOrNull(1)?.trim()
+                    ?: "Roku Device"
+                val mode = when (powerRegex.find(body)?.groupValues?.getOrNull(1)?.trim()?.lowercase()) {
                     "poweron" -> PowerMode.POWER_ON
                     "poweroff" -> PowerMode.POWER_OFF
                     "displayoff" -> PowerMode.DISPLAY_OFF
                     else -> PowerMode.UNKNOWN
                 }
-                mode
+                name to mode
             }
         } catch (e: Exception) {
             Log.e("RokuHTTP", "device-info error $ip", e)
+            "" to null
+        }
+    }
+
+    fun getPowerMode(ip: String): PowerMode? {
+        return try {
+            val req = Request.Builder().url("http://$ip:8060/query/device-info").get().build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body?.string().orEmpty()
+                val regex = Regex("<power-mode>(.*?)</power-mode>", RegexOption.IGNORE_CASE)
+                when (regex.find(body)?.groupValues?.getOrNull(1)?.trim()?.lowercase()) {
+                    "poweron" -> PowerMode.POWER_ON
+                    "poweroff" -> PowerMode.POWER_OFF
+                    "displayoff" -> PowerMode.DISPLAY_OFF
+                    else -> PowerMode.UNKNOWN
+                }
+            }
+        } catch (_: Exception) {
             null
         }
     }
 
-    /** True if TV is on. Unknown treated as OFF when used with suppression logic. */
-    fun isPoweredOn(ip: String): Boolean {
-        return when (val mode = getPowerMode(ip)) {
-            PowerMode.POWER_ON -> true
-            PowerMode.POWER_OFF, PowerMode.DISPLAY_OFF -> false
-            PowerMode.UNKNOWN, null -> false
-        }
-    }
+    fun isPoweredOn(ip: String): Boolean = (getPowerMode(ip) == PowerMode.POWER_ON)
 
-    /** SSDP then HTTP sweep fallback for discovery */
-    fun discoverDevices(context: Context, timeoutMs: Int = 3000): Set<String> {
-        val ssdp = try { ssdpDiscover(timeoutMs) } catch (e: Exception) {
-            Log.e("RokuSSDP", "SSDP error", e); emptySet()
-        }
+    /** Discover Roku devices (SSDP first, fallback to HTTP sweep) */
+    fun discoverDevices(context: Context, timeoutMs: Int = 3000): List<Device> {
+        val ssdp = try { ssdpDiscover(timeoutMs) } catch (_: Exception) { emptySet() }
         if (ssdp.isNotEmpty()) {
-            Log.d("RokuScan", "SSDP found: $ssdp")
-            return ssdp
+            Log.i("RokuScan", "SSDP found: $ssdp")
+            return ssdp.map { ip -> Device(ip, getDeviceInfo(ip).first) }
         }
-        Log.w("RokuScan", "SSDP found none; fallback to HTTP sweep")
-        val sweep = try { httpSweepLocalSubnet(context) } catch (e: Exception) {
-            Log.e("RokuScan", "HTTP sweep error", e); emptySet()
-        }
-        Log.d("RokuScan", "HTTP sweep found: $sweep")
-        return sweep
+
+        Log.w("RokuScan", "No SSDP response. Running HTTP sweep…")
+        val sweep = try { httpSweepSubnet(context) } catch (_: Exception) { emptySet() }
+        return sweep.map { ip -> Device(ip, getDeviceInfo(ip).first) }
     }
 
-    fun discoverDevices(timeoutMs: Int = 2000): Set<String> = ssdpDiscover(timeoutMs)
+    // ---------- Internals ----------
 
-    // ---- internals ----
     private fun ssdpDiscover(timeoutMs: Int): Set<String> {
         val found = mutableSetOf<String>()
         val mSearch = """
@@ -122,67 +120,56 @@ object RokuApiService {
 
         """.trimIndent().replace("\n", "\r\n")
 
-        try {
-            DatagramSocket().use { socket ->
-                socket.soTimeout = timeoutMs
-                socket.bind(null)
-                val group = InetAddress.getByName("239.255.255.250")
-                val msg = mSearch.toByteArray(Charset.forName("UTF-8"))
-                repeat(2) {
-                    val packet = DatagramPacket(msg, msg.size, InetSocketAddress(group, 1900))
-                    socket.send(packet)
-                    Thread.sleep(200)
-                }
-                val buf = ByteArray(4096)
-                val start = System.currentTimeMillis()
-                while (System.currentTimeMillis() - start < timeoutMs) {
+        DatagramSocket().use { socket ->
+            socket.soTimeout = timeoutMs
+            val group = InetAddress.getByName("239.255.255.250")
+            val msg = mSearch.toByteArray(Charset.forName("UTF-8"))
+            socket.send(DatagramPacket(msg, msg.size, InetSocketAddress(group, 1900)))
+
+            val buf = ByteArray(4096)
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < timeoutMs) {
+                try {
                     val resp = DatagramPacket(buf, buf.size)
-                    try {
-                        socket.receive(resp)
-                        val text = String(resp.data, 0, min(resp.length, buf.size))
-                        val locLine = text.lines().firstOrNull { it.startsWith("LOCATION:", true) }
-                        locLine?.let {
-                            val url = it.split(":", limit = 2).getOrNull(1)?.trim() ?: return@let
-                            val hostPart = url.removePrefix("http://").split(":").firstOrNull()
-                            hostPart?.let { ip -> found.add(ip) }
-                        }
-                    } catch (_: Exception) { /* loop until timeout */ }
+                    socket.receive(resp)
+                    val text = String(resp.data, 0, min(resp.length, buf.size))
+                    val locLine = text.lines().firstOrNull { it.startsWith("LOCATION:", true) }
+                    val host = locLine?.substringAfter("http://")?.split(":")?.firstOrNull()
+                    host?.let { found.add(it) }
+                } catch (_: Exception) { }
+            }
+        }
+        return found
+    }
+
+    private fun httpSweepSubnet(context: Context): Set<String> {
+        val wifi = context.applicationContext.getSystemService(WifiManager::class.java) ?: return emptySet()
+        val dhcp = wifi.dhcpInfo ?: return emptySet()
+        val myIp = intToIp(dhcp.ipAddress)
+        val prefix = myIp.substringBeforeLast(".")
+        val found = mutableSetOf<String>()
+
+        runBlocking(Dispatchers.IO) {
+            val jobs = (1..254).map { last ->
+                val ip = "$prefix.$last"
+                async {
+                    if (ip != myIp && httpProbe(ip)) found.add(ip)
                 }
             }
-        } catch (e: Exception) {
-            Log.e("RokuSSDP", "Discovery error", e)
+            jobs.awaitAll()
         }
         return found
     }
 
     private fun httpProbe(ip: String): Boolean {
         return try {
-            val req = Request.Builder()
-                .url("http://$ip:8060/query/device-info")
-                .get()
-                .build()
+            val req = Request.Builder().url("http://$ip:8060/query/device-info").get().build()
             sweepClient.newCall(req).execute().use { it.isSuccessful }
-        } catch (_: Exception) { false }
-    }
-
-    private fun httpSweepLocalSubnet(context: Context): Set<String> {
-        val wifi = context.applicationContext.getSystemService(WifiManager::class.java)
-        val dhcp = wifi?.dhcpInfo ?: return emptySet()
-        val myIp = intToIp(dhcp.ipAddress)
-        val prefix = myIp.substringBeforeLast(".")
-        val results = mutableSetOf<String>()
-
-        runBlocking(Dispatchers.IO) {
-            val jobs = (1..254).map { last ->
-                val ip = "$prefix.$last"
-                async { if (ip == myIp) false to ip else httpProbe(ip) to ip }
-            }
-            jobs.awaitAll().forEach { (ok, ip) -> if (ok) results.add(ip) }
+        } catch (_: Exception) {
+            false
         }
-        return results
     }
 
-    private fun intToIp(hostAddress: Int): String {
-        return "${hostAddress and 0xFF}.${hostAddress shr 8 and 0xFF}.${hostAddress shr 16 and 0xFF}.${hostAddress shr 24 and 0xFF}"
-    }
+    private fun intToIp(addr: Int): String =
+        "${addr and 0xFF}.${addr shr 8 and 0xFF}.${addr shr 16 and 0xFF}.${addr shr 24 and 0xFF}"
 }

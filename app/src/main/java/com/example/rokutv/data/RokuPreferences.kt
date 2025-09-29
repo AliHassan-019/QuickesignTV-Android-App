@@ -1,16 +1,36 @@
 package com.example.rokutv.data
 
 import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class RokuPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("roku_prefs", Context.MODE_PRIVATE)
+    private val gson = Gson()
 
-    // ---------- Devices ----------
-    fun getIpList(): Set<String> = prefs.getStringSet("ips", emptySet()) ?: emptySet()
-    fun saveIpList(ips: Set<String>) = prefs.edit().putStringSet("ips", ips).apply()
+    // ---------- Devices (persist ip + name) ----------
+    fun getDevices(): List<Device> {
+        val json = prefs.getString("devices_json", "[]") ?: "[]"
+        val type = object : TypeToken<List<Device>>() {}.type
+        return gson.fromJson<List<Device>>(json, type) ?: emptyList()
+    }
+
+    fun saveDevices(devices: List<Device>) {
+        val json = gson.toJson(devices)
+        prefs.edit().putString("devices_json", json).apply()
+    }
+
+    fun renameDevice(ip: String, newName: String) {
+        val current = getDevices().toMutableList()
+        val idx = current.indexOfFirst { it.ip == ip }
+        if (idx >= 0) {
+            current[idx] = current[idx].copy(name = newName)
+            saveDevices(current)
+        }
+    }
 
     fun getSelectedIp(): String? = prefs.getString("selected_ip", null)
     fun saveSelectedIp(ip: String?) = prefs.edit().putString("selected_ip", ip).apply()

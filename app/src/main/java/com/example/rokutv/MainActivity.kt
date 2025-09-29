@@ -4,15 +4,11 @@ package com.example.rokutv.ui
 
 import android.Manifest
 import android.app.TimePickerDialog
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,12 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Devices
-import androidx.compose.material.icons.outlined.Power
-import androidx.compose.material.icons.outlined.PowerSettingsNew
-import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -40,19 +31,13 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.example.rokutv.R
+import com.example.rokutv.data.Device
 import com.example.rokutv.data.RokuPreferences
 import com.example.rokutv.network.RokuApiService
 import com.example.rokutv.utils.Constants
 import com.example.rokutv.work.SchedulerHelper
-import com.example.rokutv.work.RokuWorker
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.Calendar
-import java.util.Locale
+import kotlinx.coroutines.*
+import java.util.*
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +47,11 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                1001
+            )
         }
 
         val prefs = RokuPreferences(this)
@@ -76,7 +65,7 @@ class MainActivity : ComponentActivity() {
                     snackbarHost = { SnackbarHost(snackbarHostState) }
                 ) { inner ->
                     Box(Modifier.padding(inner)) {
-                        RokuAppUI(prefs = prefs, snackbarHostState = snackbarHostState)
+                        RokuAppUI(prefs, snackbarHostState)
                     }
                 }
             }
@@ -90,34 +79,11 @@ fun RokuAppUI(prefs: RokuPreferences, snackbarHostState: SnackbarHostState) {
     val scope = rememberCoroutineScope()
     val scroll = rememberScrollState()
 
-    // Receive Auto Relaunch feedback from worker and show as in-app snackbar
-    DisposableEffect(Unit) {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, intent: Intent?) {
-                val msg = intent?.getStringExtra(RokuWorker.EXTRA_MESSAGE) ?: return
-                scope.launch { snackbarHostState.showSnackbar(msg) }
-            }
-        }
-        val filter = IntentFilter(RokuWorker.ACTION_FEEDBACK)
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            context.registerReceiver(receiver, filter)
-        }
-        onDispose { context.unregisterReceiver(receiver) }
-    }
-
-    val EnabledThumb = Color(0xFF22C55E)
-    val EnabledTrack = Color(0xFFBBF7D0)
-    val switchColors = SwitchDefaults.colors(
-        checkedThumbColor = EnabledThumb,
-        checkedTrackColor = EnabledTrack
-    )
-
-    var ipInput by remember { mutableStateOf("") }
-    var savedIps by remember { mutableStateOf(prefs.getIpList().toMutableList()) }
+    // State
+    var devices by remember { mutableStateOf(prefs.getDevices().toMutableList()) }
     var selectedIp by remember { mutableStateOf(prefs.getSelectedIp().orEmpty()) }
+    var ipInput by remember { mutableStateOf("") }
+    var renameTarget by remember { mutableStateOf<Device?>(null) }
 
     var expanded by remember { mutableStateOf(false) }
     var selectedApp by remember { mutableStateOf(prefs.getSelectedApp() ?: Constants.APP_QUICKESIGN) }
@@ -129,134 +95,122 @@ fun RokuAppUI(prefs: RokuPreferences, snackbarHostState: SnackbarHostState) {
     var onTime by remember { mutableStateOf(prefs.getOnTimeLabel() ?: "Not set") }
     var offTime by remember { mutableStateOf(prefs.getOffTimeLabel() ?: "Not set") }
 
-    LaunchedEffect(savedIps) {
-        if (selectedIp.isEmpty() && savedIps.isNotEmpty()) {
-            selectedIp = savedIps.first()
+    LaunchedEffect(devices) {
+        if (selectedIp.isEmpty() && devices.isNotEmpty()) {
+            selectedIp = devices.first().ip
             prefs.saveSelectedIp(selectedIp)
         }
     }
 
+    val switchColors = SwitchDefaults.colors(
+        checkedThumbColor = Color(0xFF22C55E),
+        checkedTrackColor = Color(0xFFBBF7D0)
+    )
+
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(scroll)
-            .padding(16.dp),
+        Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // IP MANAGEMENT
+        // ---- DEVICES ----
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("IP Management", style = MaterialTheme.typography.titleMedium)
+                Text("Devices", style = MaterialTheme.typography.titleMedium)
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row {
                     OutlinedTextField(
                         value = ipInput,
                         onValueChange = { ipInput = it },
                         label = { Text("Enter Roku IP") },
                         modifier = Modifier.weight(1f)
                     )
-                    FilledTonalButton(onClick = {
+                    Button(onClick = {
                         val clean = ipInput.trim()
-                        if (clean.isNotEmpty() && !savedIps.contains(clean)) {
-                            savedIps = (savedIps + clean).toMutableList()
-                            prefs.saveIpList(savedIps.toSet())
+                        if (clean.isNotEmpty() && devices.none { it.ip == clean }) {
+                            val d = Device(clean, "Roku Device")
+                            devices = (devices + d).toMutableList()
+                            prefs.saveDevices(devices)
                             if (selectedIp.isEmpty()) {
                                 selectedIp = clean
                                 prefs.saveSelectedIp(clean)
                             }
                             ipInput = ""
-                            Toast.makeText(context, "IP added", Toast.LENGTH_SHORT).show()
                         }
-                    }) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Add")
-                    }
+                    }) { Text("Add") }
                 }
 
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(160.dp)
-                ) {
-                    items(savedIps) { ip ->
+                LazyColumn(Modifier.fillMaxWidth().height(160.dp)) {
+                    items(devices) { device ->
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = if (ip == selectedIp) "✅ $ip" else ip,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable {
-                                        selectedIp = ip
-                                        prefs.saveSelectedIp(ip)
-                                    }
-                            )
-                            IconButton(onClick = {
-                                val newList = savedIps.filter { it != ip }.toMutableList()
-                                savedIps = newList
-                                prefs.saveIpList(newList.toSet())
-                                if (selectedIp == ip) {
-                                    selectedIp = newList.firstOrNull().orEmpty()
-                                    prefs.saveSelectedIp(selectedIp)
+                                text = if (device.ip == selectedIp) "✅ ${device.ip} - ${device.name}" else "${device.ip} - ${device.name}",
+                                modifier = Modifier.weight(1f).clickable {
+                                    selectedIp = device.ip
+                                    prefs.saveSelectedIp(device.ip)
                                 }
-                                Toast.makeText(context, "IP removed", Toast.LENGTH_SHORT).show()
-                            }) {
-                                Icon(Icons.Outlined.Delete, contentDescription = "Remove", tint = Color(0xFFEF4444))
+                            )
+                            Row {
+                                IconButton(onClick = { renameTarget = device }) {
+                                    Icon(Icons.Outlined.Edit, null)
+                                }
+                                IconButton(onClick = {
+                                    devices = devices.filter { it.ip != device.ip }.toMutableList()
+                                    prefs.saveDevices(devices)
+                                    if (selectedIp == device.ip) {
+                                        selectedIp = devices.firstOrNull()?.ip.orEmpty()
+                                        prefs.saveSelectedIp(selectedIp)
+                                    }
+                                }) { Icon(Icons.Outlined.Delete, null, tint = Color.Red) }
                             }
                         }
                         Divider()
                     }
                 }
-            }
-        }
 
-        // DISCOVERY
-        Card {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Discovery", style = MaterialTheme.typography.titleMedium)
                 Button(
                     onClick = {
                         scope.launch {
                             Toast.makeText(context, "Scanning…", Toast.LENGTH_SHORT).show()
                             val wifi = context.applicationContext.getSystemService(WifiManager::class.java)
-                            val lock = wifi?.createMulticastLock("roku-ssdp")?.apply { setReferenceCounted(true); acquire() }
+                            val lock = wifi?.createMulticastLock("roku-ssdp")?.apply { acquire() }
                             try {
                                 val found = withContext(Dispatchers.IO) {
                                     RokuApiService.discoverDevices(context.applicationContext, 3000)
                                 }
-                                Log.d("RokuScan", "Found: $found")
-                                if (found.isEmpty()) {
-                                    Toast.makeText(context, "No devices found", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    val merged = (savedIps + found).toSet().toMutableList()
-                                    savedIps = merged
-                                    prefs.saveIpList(merged.toSet())
+                                if (found.isNotEmpty()) {
+                                    val merged = (devices + found).distinctBy { it.ip }.toMutableList()
+                                    devices = merged
+                                    prefs.saveDevices(merged)
                                     if (selectedIp.isEmpty()) {
-                                        selectedIp = merged.first()
+                                        selectedIp = merged.first().ip
                                         prefs.saveSelectedIp(selectedIp)
                                     }
-                                    Toast.makeText(context, "Discovered: ${found.joinToString()}", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(
+                                        context,
+                                        "Discovered: ${found.joinToString { it.name }}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } else {
+                                    Toast.makeText(context, "No devices found", Toast.LENGTH_SHORT).show()
                                 }
-                            } finally {
-                                try { lock?.release() } catch (_: Exception) {}
-                            }
+                            } finally { try { lock?.release() } catch (_: Exception) {} }
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Outlined.Devices, contentDescription = null)
+                    Icon(Icons.Outlined.Devices, null)
                     Spacer(Modifier.width(8.dp))
                     Text("Scan Devices")
                 }
             }
         }
 
-        // APPLICATION
+        val ips = devices.map { it.ip }
+
+        // ---- APPLICATION ----
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Application", style = MaterialTheme.typography.titleMedium)
@@ -284,7 +238,7 @@ fun RokuAppUI(prefs: RokuPreferences, snackbarHostState: SnackbarHostState) {
             }
         }
 
-        // AUTO RELAUNCH (accept any interval >= 1s)
+        // ---- AUTO RELAUNCH ----
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Auto Relaunch", style = MaterialTheme.typography.titleMedium)
@@ -311,7 +265,7 @@ fun RokuAppUI(prefs: RokuPreferences, snackbarHostState: SnackbarHostState) {
                     Switch(
                         checked = autoLaunchEnabled,
                         onCheckedChange = { enabled ->
-                            if (savedIps.isEmpty()) {
+                            if (ips.isEmpty()) {
                                 Toast.makeText(context, "No devices available", Toast.LENGTH_SHORT).show()
                                 return@Switch
                             }
@@ -319,9 +273,8 @@ fun RokuAppUI(prefs: RokuPreferences, snackbarHostState: SnackbarHostState) {
                             prefs.setAutoRelaunchEnabled(enabled)
                             if (enabled) {
                                 SchedulerHelper.scheduleRelaunchForAll(
-                                    context.applicationContext, interval, savedIps, selectedApp
+                                    context.applicationContext, interval, ips, selectedApp
                                 )
-                                // In-app snackbar feedback like other actions
                                 scope.launch { snackbarHostState.showSnackbar("Auto relaunch enabled (every $interval sec)") }
                             } else {
                                 SchedulerHelper.cancelRelaunchAll(context.applicationContext)
@@ -334,153 +287,162 @@ fun RokuAppUI(prefs: RokuPreferences, snackbarHostState: SnackbarHostState) {
             }
         }
 
-        // DAILY SCHEDULING
+        // ---- DAILY SCHEDULING ----
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Daily Scheduling", style = MaterialTheme.typography.titleMedium)
 
-                // ON
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) { Text("Power on time: $onTime") }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            enabled = scheduleOnEnabled,
-                            onClick = {
-                                pickTime(context) { hour, minute ->
-                                    val label = formatTime(hour, minute)
-                                    onTime = label
-                                    prefs.saveOnTimeLabel(label)
-                                    SchedulerHelper.scheduleDailyForAll(context.applicationContext, "ON", hour, minute, savedIps)
-                                    scope.launch { snackbarHostState.showSnackbar("Power on scheduled at $label") }
-                                }
-                            }
-                        ) { Icon(Icons.Outlined.Schedule, contentDescription = "Change time") }
-                        Switch(
-                            checked = scheduleOnEnabled,
-                            onCheckedChange = { enabled ->
-                                if (savedIps.isEmpty()) {
-                                    Toast.makeText(context, "No devices available", Toast.LENGTH_SHORT).show()
-                                    return@Switch
-                                }
-                                scheduleOnEnabled = enabled
-                                prefs.setScheduleOnEnabled(enabled)
-                                if (enabled) {
-                                    pickTime(context) { hour, minute ->
-                                        val label = formatTime(hour, minute)
-                                        onTime = label
-                                        prefs.saveOnTimeLabel(label)
-                                        SchedulerHelper.scheduleDailyForAll(context.applicationContext, "ON", hour, minute, savedIps)
-                                        scope.launch { snackbarHostState.showSnackbar("Power on scheduled at $label") }
-                                    }
-                                } else {
-                                    onTime = "Not set"
-                                    prefs.saveOnTimeLabel(null)
-                                    SchedulerHelper.cancelDailyAll(context.applicationContext, "ON")
-                                    scope.launch { snackbarHostState.showSnackbar("Power on schedule disabled") }
-                                }
-                            },
-                            colors = switchColors
-                        )
+                scheduleRow(
+                    label = "Power on time",
+                    time = onTime,
+                    enabled = scheduleOnEnabled,
+                    onEnabledChange = { enabled ->
+                        if (ips.isEmpty()) {
+                            Toast.makeText(context, "No devices available", Toast.LENGTH_SHORT).show()
+                            return@scheduleRow
+                        }
+                        scheduleOnEnabled = enabled
+                        prefs.setScheduleOnEnabled(enabled)
+                        if (!enabled) {
+                            onTime = "Not set"
+                            prefs.saveOnTimeLabel(null)
+                            SchedulerHelper.cancelDailyAll(context.applicationContext, "ON")
+                            scope.launch { snackbarHostState.showSnackbar("Power on schedule disabled") }
+                        }
+                    },
+                    onPickTime = { hour, minute ->
+                        val label = formatTime(hour, minute)
+                        onTime = label
+                        prefs.saveOnTimeLabel(label)
+                        SchedulerHelper.scheduleDailyForAll(context.applicationContext, "ON", hour, minute, ips)
+                        scope.launch { snackbarHostState.showSnackbar("Power on scheduled at $label") }
                     }
-                }
+                )
 
                 Divider()
 
-                // OFF
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) { Text("Power off time: $offTime") }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            enabled = scheduleOffEnabled,
-                            onClick = {
-                                pickTime(context) { hour, minute ->
-                                    val label = formatTime(hour, minute)
-                                    offTime = label
-                                    prefs.saveOffTimeLabel(label)
-                                    SchedulerHelper.scheduleDailyForAll(context.applicationContext, "OFF", hour, minute, savedIps)
-                                    scope.launch { snackbarHostState.showSnackbar("Power off scheduled at $label") }
-                                }
-                            }
-                        ) { Icon(Icons.Outlined.Schedule, contentDescription = "Change time") }
-                        Switch(
-                            checked = scheduleOffEnabled,
-                            onCheckedChange = { enabled ->
-                                if (savedIps.isEmpty()) {
-                                    Toast.makeText(context, "No devices available", Toast.LENGTH_SHORT).show()
-                                    return@Switch
-                                }
-                                scheduleOffEnabled = enabled
-                                prefs.setScheduleOffEnabled(enabled)
-                                if (enabled) {
-                                    pickTime(context) { hour, minute ->
-                                        val label = formatTime(hour, minute)
-                                        offTime = label
-                                        prefs.saveOffTimeLabel(label)
-                                        SchedulerHelper.scheduleDailyForAll(context.applicationContext, "OFF", hour, minute, savedIps)
-                                        scope.launch { snackbarHostState.showSnackbar("Power off scheduled at $label") }
-                                    }
-                                } else {
-                                    offTime = "Not set"
-                                    prefs.saveOffTimeLabel(null)
-                                    SchedulerHelper.cancelDailyAll(context.applicationContext, "OFF")
-                                    scope.launch { snackbarHostState.showSnackbar("Power off schedule disabled") }
-                                }
-                            },
-                            colors = switchColors
-                        )
+                scheduleRow(
+                    label = "Power off time",
+                    time = offTime,
+                    enabled = scheduleOffEnabled,
+                    onEnabledChange = { enabled ->
+                        if (ips.isEmpty()) {
+                            Toast.makeText(context, "No devices available", Toast.LENGTH_SHORT).show()
+                            return@scheduleRow
+                        }
+                        scheduleOffEnabled = enabled
+                        prefs.setScheduleOffEnabled(enabled)
+                        if (!enabled) {
+                            offTime = "Not set"
+                            prefs.saveOffTimeLabel(null)
+                            SchedulerHelper.cancelDailyAll(context.applicationContext, "OFF")
+                            scope.launch { snackbarHostState.showSnackbar("Power off schedule disabled") }
+                        }
+                    },
+                    onPickTime = { hour, minute ->
+                        val label = formatTime(hour, minute)
+                        offTime = label
+                        prefs.saveOffTimeLabel(label)
+                        SchedulerHelper.scheduleDailyForAll(context.applicationContext, "OFF", hour, minute, ips)
+                        scope.launch { snackbarHostState.showSnackbar("Power off scheduled at $label") }
                     }
-                }
+                )
             }
         }
 
-        // MANUAL CONTROLS
+        // ---- MANUAL CONTROLS ----
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Manual Controls", style = MaterialTheme.typography.titleMedium)
 
                 Button(
                     onClick = {
-                        scope.sendToAll(savedIps, "keypress/PowerOn", "Power On", context, prefs)
-                        scope.launch { snackbarHostState.showSnackbar("Power On sent") }
+                        scope.sendToAll(ips, "keypress/PowerOn", "Power On", context, prefs)
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Outlined.Power, contentDescription = null)
+                    Icon(Icons.Outlined.Power, null)
                     Spacer(Modifier.width(8.dp))
                     Text("Power On")
                 }
                 Button(
                     onClick = {
-                        scope.sendToAll(savedIps, "keypress/PowerOff", "Power Off", context, prefs)
-                        scope.launch { snackbarHostState.showSnackbar("Power Off sent") }
+                        scope.sendToAll(ips, "keypress/PowerOff", "Power Off", context, prefs)
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Outlined.PowerSettingsNew, contentDescription = null)
+                    Icon(Icons.Outlined.PowerSettingsNew, null)
                     Spacer(Modifier.width(8.dp))
                     Text("Power Off")
                 }
                 FilledTonalButton(
                     onClick = {
                         val label = "Launch " + (Constants.APP_NAMES[selectedApp] ?: selectedApp)
-                        scope.sendToAll(savedIps, "launch/$selectedApp", label, context, prefs)
-                        scope.launch { snackbarHostState.showSnackbar("Launch sent") }
+                        scope.sendToAll(ips, "launch/$selectedApp", label, context, prefs)
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = null)
+                    Icon(Icons.Outlined.Refresh, null)
                     Spacer(Modifier.width(8.dp))
                     Text("Launch App")
                 }
             }
+        }
+    }
+
+    // ---- RENAME DIALOG ----
+    renameTarget?.let { device ->
+        var newName by remember { mutableStateOf(device.name) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Rename Device") },
+            text = {
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    label = { Text("Device Name") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val idx = devices.indexOfFirst { it.ip == device.ip }
+                    if (idx >= 0 && newName.isNotBlank()) {
+                        devices = devices.toMutableList().also {
+                            it[idx] = device.copy(name = newName.trim())
+                        }
+                        prefs.saveDevices(devices)
+                    }
+                    renameTarget = null
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+@Composable
+fun scheduleRow(
+    label: String,
+    time: String,
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    onPickTime: (Int, Int) -> Unit
+) {
+    val context = LocalContext.current
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) { Text("$label: $time") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(enabled = enabled, onClick = {
+                pickTime(context) { h, m -> onPickTime(h, m) }
+            }) { Icon(Icons.Outlined.Schedule, null) }
+            Switch(checked = enabled, onCheckedChange = onEnabledChange)
         }
     }
 }
@@ -491,7 +453,7 @@ private fun CoroutineScope.sendToAll(
     ips: List<String>,
     command: String,
     label: String,
-    context: android.content.Context,
+    context: Context,
     prefs: RokuPreferences
 ) {
     if (ips.isEmpty()) {
@@ -504,7 +466,6 @@ private fun CoroutineScope.sendToAll(
                 val clean = ip.trim()
                 if (clean.isNotBlank() && clean.contains(".")) {
                     val ok = RokuApiService.sendCommand(clean, command)
-                    // suppression flags on manual power actions
                     if (command.startsWith("keypress/PowerOff", true)) prefs.suppressIp(clean)
                     if (command.startsWith("keypress/PowerOn", true)) prefs.clearSuppression(clean)
                     ok
@@ -519,7 +480,7 @@ private fun CoroutineScope.sendToAll(
     }
 }
 
-private fun pickTime(context: android.content.Context, onTimeSelected: (Int, Int) -> Unit) {
+private fun pickTime(context: Context, onTimeSelected: (Int, Int) -> Unit) {
     val cal = Calendar.getInstance()
     TimePickerDialog(
         context,

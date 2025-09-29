@@ -29,10 +29,11 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
         val prefs = RokuPreferences(applicationContext)
         val label = labelFor(command)
 
-        // Do not wake TVs after Power Off: if suppressed and TV is OFF, skip relaunch
+        // ---- Relaunch suppression check ----
         if (isRelaunch && command.startsWith("launch/", true)) {
             if (prefs.isSuppressed(ip)) {
-                val on = RokuApiService.isPoweredOn(ip) // unknown -> treat OFF
+                // ✅ FIX: call through RokuApiService
+                val on = RokuApiService.isPoweredOn(ip)
                 if (!on) {
                     val msg = "Skipped relaunch on $ip (TV is OFF)"
                     Log.i("RokuWorker", msg)
@@ -41,12 +42,12 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
                     rescheduleRelaunch()
                     return Result.success()
                 } else {
-                    // TV back on -> resume
-                    prefs.clearSuppression(ip)
+                    prefs.clearSuppression(ip) // TV is back on → resume relaunch
                 }
             }
         }
 
+        // ---- Execute command ----
         val ok = RokuApiService.sendCommand(ip, command)
 
         if (isRelaunch && command.startsWith("launch/", true)) {
@@ -57,16 +58,15 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
         } else {
             val msg = if (ok) "$label → $ip" else "$label failed → $ip"
             (if (ok) Log.i("RokuWorker", msg) else Log.w("RokuWorker", msg))
-            // optional: we only send in-app snackbars for relaunch; manual actions already show toasts in UI
         }
 
         if (!ok) return Result.retry()
 
-        // Maintain suppression on power commands
+        // ---- Maintain suppression ----
         if (command.startsWith("keypress/PowerOff", true)) prefs.suppressIp(ip)
         if (command.startsWith("keypress/PowerOn", true)) prefs.clearSuppression(ip)
 
-        // Daily self-reschedule
+        // ---- Daily self-reschedule ----
         if (inputData.getBoolean("repeatDaily", false)) {
             val type = inputData.getString("type") ?: return Result.success()
             val hour = inputData.getInt("hour", 0)
@@ -74,7 +74,7 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
             SchedulerHelper.scheduleDaily(applicationContext, type, hour, minute, ip)
         }
 
-        // Re-chain relaunch
+        // ---- Relaunch reschedule ----
         if (isRelaunch) rescheduleRelaunch()
 
         return Result.success()
@@ -94,7 +94,7 @@ class RokuWorker(appContext: Context, workerParams: WorkerParameters) :
         else -> command
     }
 
-    // Send feedback into the running app to display as a snackbar
+    // Feedback into the app
     private fun toastToApp(message: String) {
         val intent = Intent(ACTION_FEEDBACK)
             .setPackage(applicationContext.packageName)

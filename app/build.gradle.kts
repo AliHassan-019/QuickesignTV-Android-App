@@ -6,27 +6,35 @@ plugins {
 
 android {
     namespace = "com.example.rokutv"
+
+    // ✅ must be at least 36 for androidx.core:core-ktx:1.17.0
     compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.rokutv"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 34 // keep Play Console happy; can also set 36 if tested
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // ✅ Enable shrinking for Play release
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
+        debug {
+            isMinifyEnabled = false
+        }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -51,7 +59,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
 
-    // ✅ Add this for Icons.Outlined.* (Devices, Power, Schedule, etc.)
+    // ✅ Needed for Icons.Outlined.*
     implementation("androidx.compose.material:material-icons-extended")
 
     // WorkManager + Networking
